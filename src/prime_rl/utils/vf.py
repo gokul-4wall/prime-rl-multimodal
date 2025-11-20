@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 from itertools import cycle
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import verifiers as vf
 from datasets import Dataset
@@ -133,7 +133,7 @@ async def generate_batch(
 
 # Non-batched version of vf.ProcessedOutputs
 # Also includes advantage and example_id field
-class Rollout(TypedDict):
+class Rollout(TypedDict, total=False):
     example_id: int
     task: str  # Typically the env name
     prompt_ids: list[int]
@@ -145,6 +145,10 @@ class Rollout(TypedDict):
     advantage: float
     is_truncated: bool
     metrics: dict[str, float]
+    # Optional multimodal fields
+    pixel_values: Any  # torch.Tensor with shape (C, H, W) or model-specific
+    image_grid_thw: Any  # torch.Tensor with shape (3,) for Qwen-VL, or model-specific
+    extra_model_kwargs: dict[str, Any]  # Model-specific kwargs
 
 
 def make_rollouts(
@@ -181,20 +185,32 @@ def make_rollouts(
         )
     ):
         metrics = {k: v[i] for k, v in generate_outputs.metrics.items()}
-        rollouts.append(
-            Rollout(
-                example_id=example_id,
-                task=task,
-                prompt_ids=prompt_ids,
-                prompt_mask=prompt_mask,
-                completion_ids=completion_ids,
-                completion_mask=completion_mask,
-                completion_logprobs=completion_logprobs,
-                reward=reward,
-                metrics=metrics,
-                advantage=advantage,
-                is_truncated=is_truncated,
-            )
-        )
+        
+        # Build rollout dict
+        rollout_dict: Rollout = {
+            "example_id": example_id,
+            "task": task,
+            "prompt_ids": prompt_ids,
+            "prompt_mask": prompt_mask,
+            "completion_ids": completion_ids,
+            "completion_mask": completion_mask,
+            "completion_logprobs": completion_logprobs,
+            "reward": reward,
+            "metrics": metrics,
+            "advantage": advantage,
+            "is_truncated": is_truncated,
+        }
+        
+        # Extract multimodal data if present
+        if processed_outputs.pixel_values is not None and i < len(processed_outputs.pixel_values):
+            rollout_dict["pixel_values"] = processed_outputs.pixel_values[i]
+        
+        if processed_outputs.image_grid_thw is not None and i < len(processed_outputs.image_grid_thw):
+            rollout_dict["image_grid_thw"] = processed_outputs.image_grid_thw[i]
+        
+        if processed_outputs.extra_model_kwargs:
+            rollout_dict["extra_model_kwargs"] = processed_outputs.extra_model_kwargs
+        
+        rollouts.append(rollout_dict)
 
     return rollouts

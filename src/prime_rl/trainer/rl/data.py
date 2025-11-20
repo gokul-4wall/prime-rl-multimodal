@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import torch
 from jaxtyping import Bool, Float, Int
@@ -10,7 +10,7 @@ from prime_rl.trainer.world import get_world
 from prime_rl.utils.utils import get_rollout_dir, sync_wait_for_path
 
 
-class MicroBatch(TypedDict):
+class MicroBatch(TypedDict, total=False):
     # Token level
     input_ids: Int[Tensor, "batch seq"]
     position_ids: Int[Tensor, "batch seq"]
@@ -20,6 +20,11 @@ class MicroBatch(TypedDict):
 
     # Batch level
     temperature: float
+    
+    # Optional multimodal fields
+    pixel_values: Any  # torch.Tensor with shape (batch, C, H, W) or model-specific
+    image_grid_thw: Any  # torch.Tensor with shape (batch, 3) for Qwen-VL, or model-specific
+    extra_model_kwargs: dict[str, Any]  # Model-specific kwargs
 
 
 class FakeDataLoader:

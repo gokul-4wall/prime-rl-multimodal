@@ -1,7 +1,7 @@
 import asyncio
 import time
 from itertools import cycle
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from httpx import AsyncClient
 from openai import AsyncOpenAI
@@ -52,6 +52,7 @@ class Scheduler:
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
+        adapter: Any | None = None,  # MultimodalAdapter for multimodal processing
     ):
         self.logger = get_logger()
         self.clients = clients
@@ -72,24 +73,38 @@ class Scheduler:
         self.step, self.ckpt_step = 0, 0
         self.update_weights_time, self.wait_for_ckpt_time = 0, 0
         self.sampling_args = get_sampling_args(config.sampling)
+        self.adapter = adapter
 
     def process_generate_outputs(
         self,
         generate_outputs: GenerateOutputs,
     ) -> list[Rollout]:
-        processed_outputs: ProcessedOutputs = self.env.process_env_results_vllm(
-            prompts=generate_outputs.prompt,
-            completions=generate_outputs.completion,
-            states=generate_outputs.state,
-            rewards=generate_outputs.reward,
-            processing_class=self.tokenizer,
-            max_seq_len=self.seq_len,
-            mask_env_responses=self.config.mask_env_responses,
-            zero_truncated_completions=self.config.zero_truncated_completions,
-            mask_truncated_completions=self.config.mask_truncated_completions,
-        )
+        # Use multimodal processing if adapter is provided, otherwise use text-only
+        if self.adapter is not None:
+            processed_outputs: ProcessedOutputs = self.env.process_env_results_vllm_multimodal(
+                prompts=generate_outputs.prompt,
+                completions=generate_outputs.completion,
+                states=generate_outputs.state,
+                rewards=generate_outputs.reward,
+                adapter=self.adapter,
+                max_seq_len=self.seq_len,
+                mask_truncated_completions=self.config.mask_truncated_completions,
+                zero_truncated_completions=self.config.zero_truncated_completions,
+            )
+        else:
+            processed_outputs: ProcessedOutputs = self.env.process_env_results_vllm(
+                prompts=generate_outputs.prompt,
+                completions=generate_outputs.completion,
+                states=generate_outputs.state,
+                rewards=generate_outputs.reward,
+                processing_class=self.tokenizer,
+                max_seq_len=self.seq_len,
+                mask_env_responses=self.config.mask_env_responses,
+                zero_truncated_completions=self.config.zero_truncated_completions,
+                mask_truncated_completions=self.config.mask_truncated_completions,
+            )
 
-        # Compute advantages
+        # Compute advantages (same for both text and multimodal)
         advantages = compute_advantages(
             rewards=processed_outputs.rewards,
             completion_lengths=list(map(len, processed_outputs.completion_ids)),
@@ -101,7 +116,7 @@ class Scheduler:
         responses = [state["responses"] for state in generate_outputs.state]
         is_truncated = parse_is_truncated_completions(responses=responses)
 
-        # Make rollouts
+        # Make rollouts (same for both text and multimodal)
         rollouts = make_rollouts(
             generate_outputs,
             processed_outputs,

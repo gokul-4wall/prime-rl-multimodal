@@ -9,6 +9,7 @@ from prime_rl.trainer.rl.broadcast import setup_weight_broadcast
 from prime_rl.utils.act_offloading import maybe_activation_offloading
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from torch.profiler import profile, ProfilerActivity, record_function
 from loguru import logger
 from prime_rl.trainer.ckpt import Progress, setup_ckpt_managers
@@ -205,11 +206,23 @@ def train(config: RLTrainerConfig):
             loss_scale = batch_size
         loss_scale = max(loss_scale, 1)
 
+        # Log advantage statistics from the batch
+        all_advantages = []
+        for micro_batch in micro_batches:
+            advantages = micro_batch["advantages"]
+            all_advantages.extend(advantages.flatten().tolist())
+        if all_advantages:
+            adv_tensor = torch.tensor(all_advantages)
+            logger.info(f"Batch advantage stats: min={adv_tensor.min().item():.4f}, max={adv_tensor.max().item():.4f}, mean={adv_tensor.mean().item():.4f}, std={adv_tensor.std().item():.4f}")
+            logger.info(f"Loss scale (unmasked tokens): {loss_scale}")
+            logger.debug(f"Sample advantages from batch (first 20): {all_advantages[:20]}")
+
         logger.info(f"Starting forward and backward pass ({batch_size=})")
         tensors = Tensors()  # Used to accumulate tensor statistics across micro-batches and ranks for logging
         for micro_step, micro_batch in enumerate(micro_batches):
-            # we only all reduce at the last grad acc step
-            model.set_requires_all_reduce(micro_step == len(micro_batches) - 1)
+            # we only all reduce at the last grad acc step (only available with FSDP)
+            if hasattr(model, "set_requires_all_reduce"):
+                model.set_requires_all_reduce(micro_step == len(micro_batches) - 1)
 
             input_ids = micro_batch["input_ids"].to("cuda")
             position_ids = micro_batch["position_ids"].to("cuda")
@@ -217,10 +230,33 @@ def train(config: RLTrainerConfig):
             loss_mask = micro_batch["loss_mask"].to("cuda")
             inference_logprobs = micro_batch["inference_logprobs"].to("cuda")
             temperature = micro_batch["temperature"]
+            
+            # Extract multimodal inputs if present
+            pixel_values = micro_batch.get("pixel_values")
+            if pixel_values is not None:
+                pixel_values = pixel_values.to("cuda")
+            
+            image_grid_thw = micro_batch.get("image_grid_thw")
+            if image_grid_thw is not None:
+                image_grid_thw = image_grid_thw.to("cuda")
+            
+            extra_model_kwargs = micro_batch.get("extra_model_kwargs", {})
+            # Move any tensors in extra_model_kwargs to cuda
+            extra_model_kwargs = {
+                k: v.to("cuda") if isinstance(v, torch.Tensor) else v 
+                for k, v in extra_model_kwargs.items()
+            }
 
             # Forward pass
             with maybe_record_function("forward"), maybe_activation_offloading(config.model.ac_offloading):
-                logits = forward(model, input_ids, position_ids).float().contiguous()
+                logits = forward(
+                    model, 
+                    input_ids, 
+                    position_ids,
+                    pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
+                    **extra_model_kwargs,
+                ).float().contiguous()
 
             shifted_logits = shift_logits(logits)
             shifted_logits = shifted_logits / temperature
@@ -236,6 +272,11 @@ def train(config: RLTrainerConfig):
                 loss_config=config.loss,
                 loss_scale=loss_scale,
             )
+            
+            # Log raw (unscaled) loss for debugging
+            if micro_step == 0:  # Only log once per step
+                raw_loss = loss * loss_scale
+                logger.debug(f"Raw (unscaled) loss: {raw_loss.item():.6f}, Scaled loss: {loss.item():.6f}, Loss scale: {loss_scale}")
 
             # Compute entropy
             entropy = compute_entropy(shifted_logits)
@@ -275,7 +316,11 @@ def train(config: RLTrainerConfig):
         # Convert to CUDA if on CPU (needed for FSDP CPU offloading)
         if grad_norm_dtensor.device.type == "cpu":
             grad_norm_dtensor = grad_norm_dtensor.to(torch.device("cuda"))
-        grad_norm = grad_norm_dtensor.full_tensor()
+        # Handle both DTensor (FSDP) and regular Tensor (non-FSDP, e.g., VLM models)
+        if isinstance(grad_norm_dtensor, DTensor):
+            grad_norm = grad_norm_dtensor.full_tensor()
+        else:
+            grad_norm = grad_norm_dtensor
 
         # Update the model parameters
         optimizer.step()

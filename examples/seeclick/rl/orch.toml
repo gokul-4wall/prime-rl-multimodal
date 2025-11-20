@@ -1,0 +1,18 @@
+max_steps = 100
+seq_len = 8192
+batch_size = 512
+rollouts_per_example = 16
+
+[model]
+name = "Qwen/Qwen2-VL-7B-Instruct"
+
+[orchestrator]
+multimodal_adapter = "adapters.qwen3_vl_adapter.Qwen3VLAdapter"
+
+[[env]]
+id = "seeclick"
+args = { num_examples = 50 }
+
+[sampling]
+max_tokens = 512
+

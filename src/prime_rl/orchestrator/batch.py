@@ -1,5 +1,5 @@
 import copy
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import torch
 from jaxtyping import Bool, Float, Int
@@ -10,12 +10,16 @@ from prime_rl.trainer.rl.data import MicroBatch
 from prime_rl.utils.vf import Rollout
 
 
-class BatchSample(TypedDict):
+class BatchSample(TypedDict, total=False):
     input_ids: Int[Tensor, "seq"]
     position_ids: Int[Tensor, "seq"]
     loss_mask: Bool[Tensor, "seq"]
     advantages: Float[Tensor, "seq"]
     inference_logprobs: Float[Tensor, "seq"]
+    # Optional multimodal fields
+    pixel_values: Any  # torch.Tensor with shape (C, H, W) or model-specific
+    image_grid_thw: Any  # torch.Tensor with shape (3,) for Qwen-VL, or model-specific
+    extra_model_kwargs: dict[str, Any]  # Model-specific kwargs
 
 
 def prepare_sample(
@@ -55,13 +59,29 @@ def prepare_sample(
     assert len(input_ids) == len(advantages) == len(loss_mask) == len(position_ids) == len(inference_logprobs), (
         f"input_ids: {len(input_ids)}, advantages: {len(advantages)}, loss_mask: {len(loss_mask)}, position_ids: {len(position_ids)}, inference_logprobs: {len(inference_logprobs)}"
     )
-    return {
+    
+    # Build sample dict
+    sample: BatchSample = {
         "input_ids": input_ids,
         "advantages": advantages,
         "loss_mask": loss_mask,
         "position_ids": position_ids,
         "inference_logprobs": inference_logprobs,
     }
+    
+    # Extract multimodal data if present
+    if "pixel_values" in rollout and rollout["pixel_values"] is not None:
+        # pixel_values is already a tensor from ProcessedOutputs
+        sample["pixel_values"] = rollout["pixel_values"]
+    
+    if "image_grid_thw" in rollout and rollout["image_grid_thw"] is not None:
+        # image_grid_thw is already a tensor from ProcessedOutputs
+        sample["image_grid_thw"] = rollout["image_grid_thw"]
+    
+    if "extra_model_kwargs" in rollout and rollout["extra_model_kwargs"]:
+        sample["extra_model_kwargs"] = rollout["extra_model_kwargs"]
+    
+    return sample
 
 
 def prepare_micro_batch(samples: list[MicroBatch], temperature: float):
@@ -114,10 +134,47 @@ def prepare_micro_batch_packing(samples: list[BatchSample], max_seq_len: int, te
         "Total tokens of samples is greater than max sequence length"
     )
 
+    # Pack text tokens
     for key in ["input_ids", "advantages", "loss_mask", "position_ids", "inference_logprobs"]:
         micro_batch[key] = torch.cat([sample[key] for sample in samples], dim=0).unsqueeze(0)
 
     micro_batch["temperature"] = temperature
+
+    # Stack multimodal tensors if present
+    # Check if any sample has multimodal data
+    has_pixel_values = any("pixel_values" in sample and sample["pixel_values"] is not None for sample in samples)
+    has_image_grid_thw = any("image_grid_thw" in sample and sample["image_grid_thw"] is not None for sample in samples)
+    has_extra_kwargs = any("extra_model_kwargs" in sample and sample["extra_model_kwargs"] for sample in samples)
+
+    if has_pixel_values:
+        # Stack pixel_values: each sample has shape (C, H, W), stack to (num_samples, C, H, W)
+        pixel_values_list = [
+            sample.get("pixel_values") if sample.get("pixel_values") is not None 
+            else torch.zeros_like(samples[0]["pixel_values"])  # Pad with zeros if missing
+            for sample in samples
+        ]
+        micro_batch["pixel_values"] = torch.stack(pixel_values_list, dim=0)
+
+    if has_image_grid_thw:
+        # Stack image_grid_thw: each sample has shape (3,), stack to (num_samples, 3)
+        image_grid_thw_list = [
+            sample.get("image_grid_thw") if sample.get("image_grid_thw") is not None
+            else torch.zeros(3, dtype=torch.long)  # Pad with zeros if missing
+            for sample in samples
+        ]
+        micro_batch["image_grid_thw"] = torch.stack(image_grid_thw_list, dim=0)
+
+    if has_extra_kwargs:
+        # Merge extra_model_kwargs from all samples
+        # For dict-based kwargs, we'll keep the first non-empty one or merge them
+        # This is model-specific, so we'll be conservative
+        extra_kwargs = {}
+        for sample in samples:
+            if "extra_model_kwargs" in sample and sample["extra_model_kwargs"]:
+                # Merge dicts (later samples override earlier ones for same keys)
+                extra_kwargs.update(sample["extra_model_kwargs"])
+        if extra_kwargs:
+            micro_batch["extra_model_kwargs"] = extra_kwargs
 
     return micro_batch
 
@@ -158,6 +215,13 @@ def prepare_batch(
         padded_batch = copy.deepcopy(micro_batches[0])
         padded_batch["advantages"] = torch.zeros_like(padded_batch["advantages"])
         padded_batch["loss_mask"] = torch.zeros_like(padded_batch["loss_mask"], dtype=torch.bool)
+        
+        # Zero out multimodal fields in padding batch if present
+        if "pixel_values" in padded_batch and padded_batch["pixel_values"] is not None:
+            padded_batch["pixel_values"] = torch.zeros_like(padded_batch["pixel_values"])
+        if "image_grid_thw" in padded_batch and padded_batch["image_grid_thw"] is not None:
+            padded_batch["image_grid_thw"] = torch.zeros_like(padded_batch["image_grid_thw"])
+        
         micro_batches.extend([padded_batch for _ in range(num_padding_batch)])
 
     assert len(micro_batches) % num_train_workers == 0, (

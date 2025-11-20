@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import SettingsConfigDict
 
 from prime_rl.utils.config import ClientConfig, LogConfig, ModelConfig, WandbMonitorConfig
 from prime_rl.utils.pydantic_config import BaseConfig, BaseSettings
@@ -375,6 +376,8 @@ class EnvMixConfig(BaseModel):
 class OrchestratorConfig(BaseSettings):
     """Configures the orchestrator for RL training."""
 
+    model_config = SettingsConfigDict(extra="allow")
+
     # The OAI client configuration
     client: ClientConfig = ClientConfig()
 
@@ -519,6 +522,17 @@ class OrchestratorConfig(BaseSettings):
     ] = False
 
     seed: Annotated[int | None, Field(description="Random seed for the orchestrator.")] = 42
+
+    multimodal_adapter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Adapter class path for multimodal processing. "
+                "Format: 'module.path.ClassName' (e.g., 'adapters.qwen3_vl_adapter.Qwen3VLAdapter'). "
+                "If None, text-only processing will be used."
+            ),
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def nccl_max_async_level(self):

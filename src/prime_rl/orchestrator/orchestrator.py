@@ -1,5 +1,8 @@
 import asyncio
+import importlib
+import sys
 import time
+from pathlib import Path
 
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 
@@ -111,6 +114,56 @@ async def orchestrate(config: OrchestratorConfig):
     val_buffer = Buffer(val_dataset, BufferConfig()) if val_dataset else None
 
     # Setup scheduler
+    # Load multimodal adapter if configured
+    adapter = None
+    if config.multimodal_adapter:
+        logger.info(f"Loading multimodal adapter: {config.multimodal_adapter}")
+        try:
+            # Dynamically import the adapter class
+            module_path, class_name = config.multimodal_adapter.rsplit(".", 1)
+            
+            # Try importing directly first
+            try:
+                module = importlib.import_module(module_path)
+            except ImportError:
+                # If that fails, try adding project root to path
+                # This handles cases where adapters are in the project root
+                project_root = Path(__file__).parent.parent.parent.parent.parent
+                if str(project_root) not in sys.path:
+                    sys.path.insert(0, str(project_root))
+                module = importlib.import_module(module_path)
+            
+            adapter_class = getattr(module, class_name)
+            
+            # For Qwen-VL adapters, we need to load the processor
+            # This is a common pattern, but adapters might have different requirements
+            if "qwen" in config.model.name.lower() and "vl" in config.model.name.lower():
+                from transformers import Qwen2VLProcessor
+                
+                logger.info(f"Loading Qwen2VLProcessor for {config.model.name}")
+                processor = Qwen2VLProcessor.from_pretrained(
+                    config.model.name, trust_remote_code=config.model.trust_remote_code
+                )
+                # Use processor's tokenizer (it's the same as AutoTokenizer but ensures consistency)
+                adapter_tokenizer = processor.tokenizer
+            else:
+                # For other models, use the tokenizer we already loaded
+                adapter_tokenizer = tokenizer
+                processor = None
+            
+            # Instantiate adapter
+            # Most adapters take (tokenizer, processor) or just (tokenizer)
+            if processor is not None:
+                adapter = adapter_class(tokenizer=adapter_tokenizer, processor=processor)
+            else:
+                adapter = adapter_class(tokenizer=adapter_tokenizer)
+            
+            logger.success(f"Successfully loaded adapter: {config.multimodal_adapter}")
+        except Exception as e:
+            logger.error(f"Failed to load multimodal adapter {config.multimodal_adapter}: {e}")
+            logger.error("Falling back to text-only processing")
+            adapter = None
+    
     scheduler = Scheduler(
         clients=clients,
         admin_clients=admin_clients,
@@ -122,6 +175,7 @@ async def orchestrate(config: OrchestratorConfig):
         max_async_level=config.max_async_level,
         max_off_policy_steps=config.max_off_policy_steps,
         strict_async_level=config.strict_async_level,
+        adapter=adapter,
     )
 
     # Check health of the client
@@ -400,6 +454,14 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Log distributions to W&B table
         monitor.log_distributions(distributions=distributions, step=progress.step)
+
+        # Log detailed reward and advantage statistics
+        rewards_list = results_df.reward.tolist()
+        advantages_list = results_df.advantage.tolist()
+        logger.info(f"Reward stats: min={min(rewards_list):.4f}, max={max(rewards_list):.4f}, mean={results_df.reward.mean():.4f}, std={results_df.reward.std():.4f}")
+        logger.info(f"Advantage stats: min={min(advantages_list):.4f}, max={max(advantages_list):.4f}, mean={pd.Series(advantages_list).mean():.4f}, std={pd.Series(advantages_list).std():.4f}")
+        logger.debug(f"Sample rewards (first 20): {rewards_list[:20]}")
+        logger.debug(f"Sample advantages (first 20): {advantages_list[:20]}")
 
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {results_df.reward.mean():.4f} |{f' Val. Reward: {val_results_df.reward.mean():.4f} |' if val_results_df is not None else ''} Throughput: {throughput:.1f} tokens/s | Seq. Length: {results_df.seq_len.mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
         logger.success(step_message)

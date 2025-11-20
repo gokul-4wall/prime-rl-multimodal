@@ -1,0 +1,5 @@
+[model]
+name = "Qwen/Qwen2-VL-7B-Instruct"
+max_model_len = 8192
+enforce_eager = true
+

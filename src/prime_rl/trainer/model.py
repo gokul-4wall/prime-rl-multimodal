@@ -14,7 +14,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoi
 from torch.distributed.checkpoint.hf_storage import HuggingFaceStorageReader
 from torch.distributed.checkpoint.state_dict_loader import load as dcp_load
 from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, OffloadPolicy, fully_shard
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer, PretrainedConfig
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils.import_utils import is_flash_attn_3_available
 
@@ -95,7 +95,20 @@ def get_model(
     with device:
         match config.impl:
             case "hf":
-                model_cls = AutoModelForCausalLM
+                # Detect if this is a vision-language model
+                model_type = model_config.model_type if hasattr(model_config, "model_type") else None
+                config_class_name = type(model_config).__name__.lower()
+                is_vlm = (
+                    (model_type and ("vl" in model_type.lower() or "vision" in model_type.lower()))
+                    or "qwen2_vl" in config_class_name
+                    or "vision" in config_class_name
+                )
+                
+                if is_vlm:
+                    model_cls = AutoModelForImageTextToText
+                    logger.info(f"Detected VLM model (type={model_type}, config={type(model_config).__name__}), using AutoModelForImageTextToText")
+                else:
+                    model_cls = AutoModelForCausalLM
             case "liger_kernel":
                 model_cls = AutoLigerKernelForCausalLM
             case "custom":
@@ -115,9 +128,20 @@ def get_model(
             )
         logger.debug(f"Loaded model {config.name} in {time.perf_counter() - load_model_start_time:.2f} seconds")
 
-    assert model.lm_head.weight.dtype == dtype, (
-        f"LM head dtype wasnt loaded correctly {model.lm_head.weight.dtype} != {dtype}"
-    )
+    # Check LM head dtype (VLMs might use different attribute names)
+    if hasattr(model, "lm_head") and hasattr(model.lm_head, "weight"):
+        assert model.lm_head.weight.dtype == dtype, (
+            f"LM head dtype wasnt loaded correctly {model.lm_head.weight.dtype} != {dtype}"
+        )
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "lm_head"):
+        # Some VLMs have the language model nested
+        if hasattr(model.language_model.lm_head, "weight"):
+            assert model.language_model.lm_head.weight.dtype == dtype, (
+                f"LM head dtype wasnt loaded correctly {model.language_model.lm_head.weight.dtype} != {dtype}"
+            )
+    else:
+        logger.warning(f"Could not find lm_head attribute on model {config.name}, skipping dtype check")
+    
     return model
 
 
@@ -128,6 +152,20 @@ def setup_tokenizer(config: ModelConfig) -> PreTrainedTokenizer:
 
 
 def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims):
+    # Skip FSDP for VLMs - they have different model structure
+    if not (hasattr(model, "model") and hasattr(model.model, "layers")):
+        logger = get_logger()
+        logger.warning(f"Skipping FSDP setup for VLM model (type: {type(model).__name__})")
+        # FlashAttention requires bf16 or fp16, so convert model to bfloat16 if FlashAttention is enabled
+        device = torch.device(f"cuda:{get_world().local_rank}")
+        if config.attn in ("flash_attention_2", "flash_attention_3"):
+            logger.info(f"Converting VLM model to bfloat16 and moving to {device} for FlashAttention compatibility")
+            model.to(dtype=torch.bfloat16, device=device)
+        else:
+            logger.info(f"Moving VLM model to {device}")
+            model.to(device)
+        return
+    
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=DTYPE_MAP[config.reduce_dtype])
     # Always use 2D mesh format for consistency (dp_replicate dimension always present)
     hsdp_mesh = parallel_dims.world_mesh["dp_replicate", "dp_shard_cp"]
@@ -337,6 +375,38 @@ def setup_model(config: ModelConfig, parallel_dims: ParallelDims) -> nn.Module:
 
 @jaxtyped(typechecker=typechecker)
 def forward(
-    model: nn.Module, input_ids: Int[Tensor, "batch seq"], position_ids: Int[Tensor, "batch seq"]
+    model: nn.Module,
+    input_ids: Int[Tensor, "batch seq"],
+    position_ids: Int[Tensor, "batch seq"],
+    pixel_values: Tensor | None = None,
+    image_grid_thw: Tensor | None = None,
+    **extra_kwargs,
 ) -> Float[Tensor, "batch seq vocab"]:
-    return model(input_ids=input_ids, position_ids=position_ids).logits
+    """Forward pass for both text-only and multimodal models.
+    
+    Args:
+        model: The model to run forward pass on
+        input_ids: Input token IDs
+        position_ids: Position IDs
+        pixel_values: Optional pixel values for multimodal models (e.g., Qwen-VL)
+        image_grid_thw: Optional image grid metadata for Qwen2VL models
+        **extra_kwargs: Additional model-specific kwargs
+    
+    Returns:
+        Logits tensor
+    """
+    model_kwargs = {
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+    }
+    
+    # Add multimodal inputs if present
+    if pixel_values is not None:
+        model_kwargs["pixel_values"] = pixel_values
+    if image_grid_thw is not None:
+        model_kwargs["image_grid_thw"] = image_grid_thw
+    
+    # Add any extra model-specific kwargs
+    model_kwargs.update(extra_kwargs)
+    
+    return model(**model_kwargs).logits
