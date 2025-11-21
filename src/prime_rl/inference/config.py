@@ -1,7 +1,8 @@
 from argparse import Namespace
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
+from pydantic_settings import SettingsConfigDict
 
 from prime_rl.utils.pydantic_config import BaseConfig, BaseSettings, get_all_fields
 from prime_rl.utils.utils import rgetattr, rsetattr
@@ -18,6 +19,8 @@ class ServerConfig(BaseConfig):
 
 class ParallelConfig(BaseConfig):
     """Configures multi-node and multi-GPU setups through different types of parallelism (TP, DP, PP)."""
+
+    model_config = ConfigDict(extra="allow")
 
     tp: Annotated[
         int,
@@ -102,6 +105,8 @@ class WeightBroadcastConfig(BaseSettings):
 class InferenceConfig(BaseSettings):
     """Configures inference."""
 
+    model_config = SettingsConfigDict(extra="allow")
+
     # The server configuration
     server: ServerConfig = ServerConfig()
 
@@ -156,6 +161,13 @@ class InferenceConfig(BaseSettings):
         for key in get_all_fields(self):
             value = rgetattr(self, key.replace("-", "_"))
             rsetattr(namespace, to_vllm.get(key, key), value)
+
+        # Include extra fields (e.g., limit_mm_per_prompt) from __pydantic_extra__
+        if hasattr(self, "__pydantic_extra__") and self.__pydantic_extra__:
+            for key, value in self.__pydantic_extra__.items():
+                # Convert snake_case to the format vLLM expects (kebab-case for CLI, but here we use snake_case for namespace)
+                vllm_key = key.replace("_", "-")
+                rsetattr(namespace, vllm_key, value)
 
         # Set `logprobs_mode` to `processed_logprobs` by default
         rsetattr(namespace, "logprobs_mode", "processed_logprobs")

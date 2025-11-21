@@ -1,0 +1,17 @@
+# Extra vLLM arguments (passed directly to vLLM via allow_extras)
+# limit_mm_per_prompt tells vLLM to process images via OpenAI API
+# Format: JSON string with media type and count
+# Clockbench uses 1 image per prompt
+limit_mm_per_prompt = '{"image": 1}'
+
+[model]
+name = "Qwen/Qwen2-VL-7B-Instruct"
+max_model_len = 8192
+enforce_eager = true
+
+[server]
+port = 8000
+
+[parallel]
+tp = 1
+dp = 1

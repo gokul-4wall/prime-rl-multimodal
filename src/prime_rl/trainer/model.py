@@ -152,27 +152,60 @@ def setup_tokenizer(config: ModelConfig) -> PreTrainedTokenizer:
 
 
 def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims):
-    # Skip FSDP for VLMs - they have different model structure
-    if not (hasattr(model, "model") and hasattr(model.model, "layers")):
-        logger = get_logger()
-        logger.warning(f"Skipping FSDP setup for VLM model (type: {type(model).__name__})")
-        # FlashAttention requires bf16 or fp16, so convert model to bfloat16 if FlashAttention is enabled
-        device = torch.device(f"cuda:{get_world().local_rank}")
-        if config.attn in ("flash_attention_2", "flash_attention_3"):
-            logger.info(f"Converting VLM model to bfloat16 and moving to {device} for FlashAttention compatibility")
-            model.to(dtype=torch.bfloat16, device=device)
-        else:
-            logger.info(f"Moving VLM model to {device}")
-            model.to(device)
-        return
-    
+    """
+    Setup FSDP for model. Supports both standard transformers (model.model.layers)
+    and VLMs (model.language_model.layers or model.model.language_model.layers).
+    """
+    logger = get_logger()
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=DTYPE_MAP[config.reduce_dtype])
     # Always use 2D mesh format for consistency (dp_replicate dimension always present)
     hsdp_mesh = parallel_dims.world_mesh["dp_replicate", "dp_shard_cp"]
-
     offload_policy: OffloadPolicy = CPUOffloadPolicy(pin_memory=True) if config.fsdp_cpu_offload else OffloadPolicy()
 
-    for transformer_block in model.model.layers:
+    # Detect model structure: standard transformer vs VLM
+    layers = None
+    embed_tokens = None
+    norm = None
+    lm_head = None
+    is_vlm = False
+    
+    # Check for standard transformer structure (model.model.layers)
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+        embed_tokens = getattr(model.model, "embed_tokens", None)
+        norm = getattr(model.model, "norm", None)
+        lm_head = getattr(model, "lm_head", None)
+        logger.info("Detected standard transformer structure (model.model.layers)")
+    # Check for VLM structure: model.language_model.layers
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        layers = model.language_model.layers
+        embed_tokens = getattr(model.language_model, "embed_tokens", None)
+        norm = getattr(model.language_model, "norm", None)
+        lm_head = getattr(model, "lm_head", None) or getattr(model.language_model, "lm_head", None)
+        is_vlm = True
+        logger.info("Detected VLM structure (model.language_model.layers)")
+    # Check for VLM structure: model.model.language_model.layers
+    elif hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+        layers = model.model.language_model.layers
+        embed_tokens = getattr(model.model.language_model, "embed_tokens", None)
+        norm = getattr(model.model.language_model, "norm", None)
+        lm_head = getattr(model, "lm_head", None) or getattr(model.model.language_model, "lm_head", None)
+        is_vlm = True
+        logger.info("Detected VLM structure (model.model.language_model.layers)")
+    else:
+        # Unknown structure - skip FSDP
+        logger.warning(f"Skipping FSDP setup for model with unknown structure (type: {type(model).__name__})")
+        device = torch.device(f"cuda:{get_world().local_rank}")
+        if config.attn in ("flash_attention_2", "flash_attention_3"):
+            logger.info(f"Converting model to bfloat16 and moving to {device} for FlashAttention compatibility")
+            model.to(dtype=torch.bfloat16, device=device)
+        else:
+            logger.info(f"Moving model to {device}")
+            model.to(device)
+        return
+
+    # Wrap transformer layers
+    for transformer_block in layers:
         fully_shard(
             transformer_block,
             mesh=hsdp_mesh,
@@ -181,25 +214,53 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
             reshard_after_forward=config.reshard_after_forward,
         )
 
-    if hasattr(model, "config") and not model.config.tie_word_embeddings:
-        # This optimization breaks weight tying
-        fully_shard(
-            model.model.embed_tokens,
-            mesh=hsdp_mesh,
-            mp_policy=mp_policy,
-            offload_policy=offload_policy,
-            reshard_after_forward=config.reshard_after_forward,
-        )
-        fully_shard(
-            [model.lm_head, model.model.norm],
-            mesh=hsdp_mesh,
-            mp_policy=mp_policy,
-            offload_policy=offload_policy,
-            reshard_after_forward=False,
-        )
+    # Wrap embeddings and norm if available and not tied
+    # For standard transformers, use original logic exactly
+    if not is_vlm:
+        # Standard transformer path - maintain exact backward compatibility
+        if hasattr(model, "config") and not model.config.tie_word_embeddings:
+            # This optimization breaks weight tying
+            fully_shard(
+                model.model.embed_tokens,
+                mesh=hsdp_mesh,
+                mp_policy=mp_policy,
+                offload_policy=offload_policy,
+                reshard_after_forward=config.reshard_after_forward,
+            )
+            fully_shard(
+                [model.lm_head, model.model.norm],
+                mesh=hsdp_mesh,
+                mp_policy=mp_policy,
+                offload_policy=offload_policy,
+                reshard_after_forward=False,
+            )
+        else:
+            logger.warning("Model is tied word embeddings, so not doing the last layer not resharding optimization")
     else:
-        get_logger().warning("Model is tied word embeddings, so not doing the last layer not resharding optimization")
+        # VLM path - wrap language_model components
+        # Check for tie_word_embeddings if config is available
+        tie_embeddings = hasattr(model, "config") and getattr(model.config, "tie_word_embeddings", False)
+        if not tie_embeddings:
+            if embed_tokens is not None:
+                fully_shard(
+                    embed_tokens,
+                    mesh=hsdp_mesh,
+                    mp_policy=mp_policy,
+                    offload_policy=offload_policy,
+                    reshard_after_forward=config.reshard_after_forward,
+                )
+            if norm is not None and lm_head is not None:
+                fully_shard(
+                    [lm_head, norm],
+                    mesh=hsdp_mesh,
+                    mp_policy=mp_policy,
+                    offload_policy=offload_policy,
+                    reshard_after_forward=False,
+                )
+        else:
+            logger.warning("VLM model has tied word embeddings, so not doing the last layer not resharding optimization")
 
+    # Wrap the entire model
     fully_shard(
         model,
         mesh=hsdp_mesh,
@@ -320,19 +381,58 @@ def reshard_module(model: nn.Module):
 
 
 def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
-    for layer_id, (layer_name, transformer_block) in enumerate(model.model.layers.named_children()):
+    """
+    Apply activation checkpointing. Supports both standard transformers and VLMs.
+    """
+    logger = get_logger()
+    layers = None
+    
+    # Detect model structure
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+        layers_attr = "model.model.layers"
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        layers = model.language_model.layers
+        layers_attr = "language_model.layers"
+    elif hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+        layers = model.model.language_model.layers
+        layers_attr = "model.model.language_model.layers"
+    else:
+        raise ValueError(f"Cannot apply activation checkpointing: model structure not recognized (type: {type(model).__name__})")
+    
+    for layer_id, (layer_name, transformer_block) in enumerate(layers.named_children()):
         if layer_id % ac_config.freq == 0:
             transformer_block = checkpoint_wrapper(transformer_block, preserve_rng_state=False)
-        model.model.layers.register_module(layer_name, transformer_block)
-    get_logger().info(f"Applied activation checkpointing (freq={ac_config.freq})")
+        layers.register_module(layer_name, transformer_block)
+    logger.info(f"Applied activation checkpointing to {layers_attr} (freq={ac_config.freq})")
 
 
 def apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """
+    Apply torch.compile to model layers. Supports both standard transformers and VLMs.
+    """
+    logger = get_logger()
     torch._dynamo.config.capture_scalar_outputs = True
-    for layer_id in range(len(model.model.layers)):
+    layers = None
+    layers_attr = None
+    
+    # Detect model structure
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+        layers_attr = "model.model.layers"
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        layers = model.language_model.layers
+        layers_attr = "language_model.layers"
+    elif hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+        layers = model.model.language_model.layers
+        layers_attr = "model.model.language_model.layers"
+    else:
+        raise ValueError(f"Cannot apply compilation: model structure not recognized (type: {type(model).__name__})")
+    
+    for layer_id in range(len(layers)):
         # Doing it in-place avoids mangled fqn which can break checkpoint loading
-        model.model.layers[layer_id].compile(fullgraph=compile_config.fullgraph)
-    get_logger().info(f"Compiled {len(model.model.layers)} layers (fullgraph={compile_config.fullgraph})")
+        layers[layer_id].compile(fullgraph=compile_config.fullgraph)
+    logger.info(f"Compiled {len(layers)} layers from {layers_attr} (fullgraph={compile_config.fullgraph})")
 
 
 def setup_model(config: ModelConfig, parallel_dims: ParallelDims) -> nn.Module:

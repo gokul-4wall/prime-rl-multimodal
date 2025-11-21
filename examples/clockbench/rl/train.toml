@@ -1,0 +1,9 @@
+max_steps = 100
+
+[model]
+name = "Qwen/Qwen2-VL-2B-Instruct"
+fsdp_cpu_offload = true
+
+[optim]
+lr = 1e-5
+

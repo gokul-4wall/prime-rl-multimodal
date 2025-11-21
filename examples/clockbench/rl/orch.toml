@@ -1,0 +1,18 @@
+max_steps = 100
+seq_len = 4096
+batch_size = 32
+rollouts_per_example = 8
+
+[model]
+name = "Qwen/Qwen2-VL-2B-Instruct"
+
+[orchestrator]
+multimodal_adapter = "adapters.qwen3_vl_adapter.Qwen3VLAdapter"
+
+[[env]]
+id = "clockbench"
+args = { dataset_split = "train", max_samples = -1 }
+
+[sampling]
+max_tokens = 512
+
