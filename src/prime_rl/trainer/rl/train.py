@@ -236,10 +236,7 @@ def train(config: RLTrainerConfig):
             if pixel_values is not None:
                 pixel_values = pixel_values.to("cuda")
             
-            image_grid_thw = micro_batch.get("image_grid_thw")
-            if image_grid_thw is not None:
-                image_grid_thw = image_grid_thw.to("cuda")
-            
+            # Get extra model kwargs (contains image_grid_thw for VLMs)
             extra_model_kwargs = micro_batch.get("extra_model_kwargs", {})
             # Move any tensors in extra_model_kwargs to cuda
             extra_model_kwargs = {
@@ -254,7 +251,6 @@ def train(config: RLTrainerConfig):
                     input_ids, 
                     position_ids,
                     pixel_values=pixel_values,
-                    image_grid_thw=image_grid_thw,
                     **extra_model_kwargs,
                 ).float().contiguous()
 

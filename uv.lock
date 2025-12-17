@@ -2123,6 +2123,27 @@ wheels = [
 ]
 
 [[package]]
+name = "peft"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4b/0c/f2938db546ac7fc961ab5917cd50fcf5d0d70b406de93e3faccaa504e152/peft-0.18.0.tar.gz", hash = "sha256:c81c80b2056ab40c23d58ef25f74daab417ac653970718589a11a8af28218588", size = 634141, upload-time = "2025-11-13T11:13:06.603Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/55/481bf25613d40ef53534f664deba7b138fe566356b6ca10304e2b3b2529c/peft-0.18.0-py3-none-any.whl", hash = "sha256:624f69ca6393b765ccc6734adda7ca57d80b238f0900a42c357d8b67a03d62ff", size = 556427, upload-time = "2025-11-13T11:13:03.664Z" },
+]
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2222,6 +2243,7 @@ dependencies = [
     { name = "nltk" },
     { name = "numpy" },
     { name = "openai" },
+    { name = "peft" },
     { name = "prime-evals" },
     { name = "prime-sandboxes" },
     { name = "pydantic" },
@@ -2271,6 +2293,7 @@ requires-dist = [
     { name = "nltk", specifier = ">=3.9.1" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "openai", specifier = ">=1.106.1" },
+    { name = "peft", specifier = ">=0.18.0" },
     { name = "prime-evals", specifier = ">=0.1.2" },
     { name = "prime-sandboxes", specifier = ">=0.2.3" },
     { name = "pydantic", specifier = ">=1.10.13" },
@@ -2287,7 +2310,7 @@ requires-dist = [
     { name = "torchtitan", git = "https://github.com/pytorch/torchtitan?rev=a1fdd7e" },
     { name = "transformers", specifier = ">=4.56.0" },
     { name = "uvloop", specifier = ">=0.21.0" },
-    { name = "verifiers", editable = "../" },
+    { name = "verifiers", editable = "../verifiers-multimodal" },
     { name = "vllm", specifier = "==0.10.2" },
     { name = "wandb", specifier = ">=0.20.1" },
 ]
@@ -3609,7 +3632,7 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-source = { editable = "../" }
+source = { editable = "../verifiers-multimodal" }
 dependencies = [
     { name = "datasets" },
     { name = "jinja2" },

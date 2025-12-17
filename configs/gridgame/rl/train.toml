@@ -1,0 +1,19 @@
+# RL Trainer Config for GridGame
+# Trains a vision-language model on grid coordinate prediction task
+
+max_steps = 100
+max_async_level = 1  # Must match orchestrator config
+
+[model]
+# For multimodal training, use a VLM (Vision-Language Model)
+name = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+# Attention implementation
+attn = "flash_attention_2"
+
+# Trust remote code for VLMs
+trust_remote_code = true
+
+[optim]
+lr = 3e-6
+

@@ -1,0 +1,37 @@
+# Orchestrator Config for GridGame
+# Manages rollout generation and coordinates trainer/inference
+
+# Training hyperparameters
+batch_size = 16  # Total samples per training step
+rollouts_per_example = 4  # Multiple attempts per grid problem
+seq_len = 4096
+max_steps = 100  # Total training steps
+
+# Loss masking - don't train on environment responses
+mask_truncated_completions = false
+mask_env_responses = true
+
+# Async training settings
+max_async_level = 1  # Allow inference to be 1 step ahead
+max_off_policy_steps = 8  # Tolerate some off-policy samples
+
+# CRITICAL: Multimodal adapter for vision-language models
+# This tells the orchestrator to use the Qwen3VLAdapter for processing images
+multimodal_adapter = "adapters.qwen3_vl_adapter.Qwen3VLAdapter"
+
+[model]
+# MUST match the model in train.toml and infer.toml
+name = "Qwen/Qwen2.5-VL-3B-Instruct"
+trust_remote_code = true
+
+[sampling]
+# Sampling parameters for generating rollouts
+temperature = 0.7
+max_tokens = 512  # More room for step-by-step reasoning before \boxed{x,y}
+min_tokens = 5
+
+# Environment configuration
+[[env]]
+id = "gridgame"
+args = { split = "easy" }  # Start with easy difficulty
+

@@ -147,34 +147,46 @@ def prepare_micro_batch_packing(samples: list[BatchSample], max_seq_len: int, te
     has_extra_kwargs = any("extra_model_kwargs" in sample and sample["extra_model_kwargs"] for sample in samples)
 
     if has_pixel_values:
-        # Stack pixel_values: each sample has shape (C, H, W), stack to (num_samples, C, H, W)
+        # For Qwen-VL models, pixel_values are already flattened (num_patches, channels)
+        # Concatenate along patch dimension (dim=0), not stack
         pixel_values_list = [
-            sample.get("pixel_values") if sample.get("pixel_values") is not None 
-            else torch.zeros_like(samples[0]["pixel_values"])  # Pad with zeros if missing
-            for sample in samples
+            sample.get("pixel_values") for sample in samples 
+            if sample.get("pixel_values") is not None
         ]
-        micro_batch["pixel_values"] = torch.stack(pixel_values_list, dim=0)
+        if pixel_values_list:
+            micro_batch["pixel_values"] = torch.cat(pixel_values_list, dim=0)
 
+    # Build extra_model_kwargs for VLM-specific parameters
+    extra_kwargs = {}
+    
     if has_image_grid_thw:
-        # Stack image_grid_thw: each sample has shape (3,), stack to (num_samples, 3)
+        # For Qwen-VL, image_grid_thw has shape (3,) for single image or (num_images, 3) for multiple
+        # Stack them to create (total_images, 3) tensor
         image_grid_thw_list = [
-            sample.get("image_grid_thw") if sample.get("image_grid_thw") is not None
-            else torch.zeros(3, dtype=torch.long)  # Pad with zeros if missing
-            for sample in samples
+            sample.get("image_grid_thw") for sample in samples
+            if sample.get("image_grid_thw") is not None
         ]
-        micro_batch["image_grid_thw"] = torch.stack(image_grid_thw_list, dim=0)
+        if image_grid_thw_list:
+            # Handle both 1D (single image) and 2D (multiple images) cases
+            processed_grids = []
+            for grid in image_grid_thw_list:
+                if grid.dim() == 1:
+                    # Single image: shape (3,) -> (1, 3)
+                    processed_grids.append(grid.unsqueeze(0))
+                else:
+                    # Multiple images: shape (n, 3) -> keep as is
+                    processed_grids.append(grid)
+            extra_kwargs["image_grid_thw"] = torch.cat(processed_grids, dim=0)
 
     if has_extra_kwargs:
         # Merge extra_model_kwargs from all samples
-        # For dict-based kwargs, we'll keep the first non-empty one or merge them
-        # This is model-specific, so we'll be conservative
-        extra_kwargs = {}
+        # For dict-based kwargs, we'll merge them (later samples override earlier ones for same keys)
         for sample in samples:
             if "extra_model_kwargs" in sample and sample["extra_model_kwargs"]:
-                # Merge dicts (later samples override earlier ones for same keys)
                 extra_kwargs.update(sample["extra_model_kwargs"])
-        if extra_kwargs:
-            micro_batch["extra_model_kwargs"] = extra_kwargs
+    
+    if extra_kwargs:
+        micro_batch["extra_model_kwargs"] = extra_kwargs
 
     return micro_batch
 
@@ -219,8 +231,11 @@ def prepare_batch(
         # Zero out multimodal fields in padding batch if present
         if "pixel_values" in padded_batch and padded_batch["pixel_values"] is not None:
             padded_batch["pixel_values"] = torch.zeros_like(padded_batch["pixel_values"])
-        if "image_grid_thw" in padded_batch and padded_batch["image_grid_thw"] is not None:
-            padded_batch["image_grid_thw"] = torch.zeros_like(padded_batch["image_grid_thw"])
+        if "extra_model_kwargs" in padded_batch and padded_batch["extra_model_kwargs"]:
+            if "image_grid_thw" in padded_batch["extra_model_kwargs"]:
+                padded_batch["extra_model_kwargs"]["image_grid_thw"] = torch.zeros_like(
+                    padded_batch["extra_model_kwargs"]["image_grid_thw"]
+                )
         
         micro_batches.extend([padded_batch for _ in range(num_padding_batch)])
 
