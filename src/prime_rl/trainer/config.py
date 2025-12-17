@@ -176,6 +176,13 @@ class ModelConfig(BaseConfig):
         ),
     ] = False
 
+    freeze_vision_encoder: Annotated[
+        bool,
+        Field(
+            description="Whether to freeze the vision encoder for VLM models. Only applies to vision-language models.",
+        ),
+    ] = False
+
     dp_replicate: Annotated[
         int,
         Field(

@@ -142,6 +142,48 @@ def get_model(
     else:
         logger.warning(f"Could not find lm_head attribute on model {config.name}, skipping dtype check")
     
+    # Freeze vision encoder if requested (for VLMs)
+    if config.freeze_vision_encoder:
+        frozen_params = 0
+        vision_modules = []
+        
+        # Common vision encoder paths across different VLM architectures
+        # Format: (path, attribute_chain) - we try both direct and nested paths
+        vision_paths = [
+            # Direct attributes (e.g., LLaVA-style)
+            ("visual", ["visual"]),
+            ("vision_model", ["vision_model"]),
+            ("vision_tower", ["vision_tower"]),
+            ("image_encoder", ["image_encoder"]),
+            ("vit", ["vit"]),
+            # Nested under model (e.g., Qwen-VL style: model.model.visual)
+            ("model.visual", ["model", "visual"]),
+            ("model.vision_model", ["model", "vision_model"]),
+        ]
+        
+        for path_name, attr_chain in vision_paths:
+            obj = model
+            found = True
+            for attr in attr_chain:
+                if hasattr(obj, attr):
+                    obj = getattr(obj, attr)
+                else:
+                    found = False
+                    break
+            if found and obj is not model:
+                vision_modules.append((path_name, obj))
+                break  # Only freeze one vision encoder
+        
+        if vision_modules:
+            for module_name, module in vision_modules:
+                for param in module.parameters():
+                    if param.requires_grad:
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+            logger.info(f"Froze vision encoder '{vision_modules[0][0]}': {frozen_params:,} parameters frozen")
+        else:
+            logger.warning(f"freeze_vision_encoder=True but no vision encoder found. Searched paths: {[p[0] for p in vision_paths]}")
+    
     return model
 
 
