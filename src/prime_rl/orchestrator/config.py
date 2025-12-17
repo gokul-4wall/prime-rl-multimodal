@@ -534,6 +534,17 @@ class OrchestratorConfig(BaseSettings):
         ),
     ] = None
 
+    image_scale: Annotated[
+        float,
+        Field(
+            description=(
+                "Scale factor for resizing images in multimodal processing. "
+                "1.0 = original size, 0.5 = half size (reduces token count significantly). "
+                "Only used when multimodal_adapter is set."
+            ),
+        ),
+    ] = 1.0
+
     @model_validator(mode="after")
     def nccl_max_async_level(self):
         if self.weight_broadcast.type == "nccl":

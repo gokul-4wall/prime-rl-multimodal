@@ -17,6 +17,15 @@ trust_remote_code = true
 # Freeze vision encoder (typical for VLM fine-tuning)
 freeze_vision_encoder = true
 
+# Use DDP (full model replication) instead of FSDP (sharding)
+# With 2 GPUs: dp_replicate=2 means dp_shard=1 (no sharding)
+dp_replicate = 6
+
 [optim]
-lr = 1e-5  # Increased - VLM examples use 1e-5
+lr = 1e-5  # Increased to help with gradient flow
+
+[loss]
+# Effectively disable masking to allow all gradients to flow
+mask_ratio_high = 10000.0  # Effectively infinity - no upper bound masking
+mask_ratio_low = 0.1         # No lower bound masking
 

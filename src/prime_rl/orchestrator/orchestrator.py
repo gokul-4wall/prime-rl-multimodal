@@ -152,9 +152,15 @@ async def orchestrate(config: OrchestratorConfig):
                 processor = None
             
             # Instantiate adapter
-            # Most adapters take (tokenizer, processor) or just (tokenizer)
+            # Most adapters take (tokenizer, processor, image_scale) or just (tokenizer)
             if processor is not None:
-                adapter = adapter_class(tokenizer=adapter_tokenizer, processor=processor)
+                adapter = adapter_class(
+                    tokenizer=adapter_tokenizer, 
+                    processor=processor,
+                    image_scale=config.image_scale
+                )
+                if config.image_scale != 1.0:
+                    logger.info(f"Image scale set to {config.image_scale} (images will be resized)")
             else:
                 adapter = adapter_class(tokenizer=adapter_tokenizer)
             
