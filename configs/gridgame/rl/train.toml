@@ -14,6 +14,9 @@ attn = "flash_attention_2"
 # Trust remote code for VLMs
 trust_remote_code = true
 
+# Freeze vision encoder (typical for VLM fine-tuning)
+freeze_vision_encoder = true
+
 [optim]
-lr = 3e-6
+lr = 1e-5  # Increased - VLM examples use 1e-5
 

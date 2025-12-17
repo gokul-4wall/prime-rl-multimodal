@@ -2,8 +2,8 @@
 # Manages rollout generation and coordinates trainer/inference
 
 # Training hyperparameters
-batch_size = 16  # Total samples per training step
-rollouts_per_example = 4  # Multiple attempts per grid problem
+batch_size = 256  # Total samples per training step
+rollouts_per_example = 32  # Multiple attempts per grid problem
 seq_len = 4096
 max_steps = 100  # Total training steps
 
