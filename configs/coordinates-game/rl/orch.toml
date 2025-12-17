@@ -1,0 +1,25 @@
+max_steps = 100
+seq_len = 3200
+
+# Must be divisible by rollouts_per_example
+batch_size = 1536
+rollouts_per_example = 64
+
+# Required for image inputs
+multimodal_adapter = "adapters.qwen3_vl_adapter.Qwen3VLAdapter"
+
+# Use 6 trainer workers to match 6 DDP trainer GPUs
+num_train_workers = 6
+
+[model]
+name = "Qwen/Qwen2.5-VL-3B-Instruct"
+trust_remote_code = true
+
+[sampling]
+max_tokens = 512
+
+[[env]]
+id = "coordinates-game"
+args = { num_examples = 10000 }
+
+

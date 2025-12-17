@@ -1,0 +1,17 @@
+max_steps = 100
+
+[model]
+# Vision-language model for coordinate reading
+name = "Qwen/Qwen2.5-VL-3B-Instruct"
+trust_remote_code = true
+
+# Freezing the vision encoder is a common, stable default for VLM RL fine-tuning
+freeze_vision_encoder = true
+
+# DDP only (no sharding): with 6 trainer GPUs, dp_replicate=6 => dp_shard=1
+dp_replicate = 6
+
+[optim]
+lr = 1e-6
+
+

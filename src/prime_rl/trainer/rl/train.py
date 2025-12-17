@@ -235,6 +235,11 @@ def train(config: RLTrainerConfig):
             pixel_values = micro_batch.get("pixel_values")
             if pixel_values is not None:
                 pixel_values = pixel_values.to("cuda")
+
+            # Some multimodal pipelines store image metadata separately from extra_model_kwargs
+            image_grid_thw = micro_batch.get("image_grid_thw")
+            if isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw = image_grid_thw.to("cuda")
             
             # Get extra model kwargs (contains image_grid_thw for VLMs)
             extra_model_kwargs = micro_batch.get("extra_model_kwargs", {})
@@ -244,6 +249,22 @@ def train(config: RLTrainerConfig):
                 for k, v in extra_model_kwargs.items()
             }
 
+            # Fail-fast for multimodal: Qwen2.5-VL requires image_grid_thw when pixel_values are present.
+            # This is gated on pixel_values so text-only training remains unchanged.
+            if pixel_values is not None:
+                # Prefer the explicit micro_batch field; otherwise fall back to extra_model_kwargs.
+                # If we end up passing image_grid_thw explicitly, remove it from extra_model_kwargs
+                # to avoid "multiple values for keyword argument" errors.
+                if image_grid_thw is None and "image_grid_thw" in extra_model_kwargs:
+                    image_grid_thw = extra_model_kwargs.pop("image_grid_thw")
+                elif image_grid_thw is not None and "image_grid_thw" in extra_model_kwargs:
+                    extra_model_kwargs.pop("image_grid_thw")
+                if image_grid_thw is None:
+                    raise RuntimeError(
+                        "Multimodal batch has pixel_values but missing image_grid_thw. "
+                        "This will crash Qwen2.5-VL vision forward."
+                    )
+
             # Forward pass
             with maybe_record_function("forward"), maybe_activation_offloading(config.model.ac_offloading):
                 logits = forward(
@@ -251,6 +272,7 @@ def train(config: RLTrainerConfig):
                     input_ids, 
                     position_ids,
                     pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
                     **extra_model_kwargs,
                 ).float().contiguous()
 

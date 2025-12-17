@@ -158,7 +158,7 @@ def prepare_micro_batch_packing(samples: list[BatchSample], max_seq_len: int, te
 
     # Build extra_model_kwargs for VLM-specific parameters
     extra_kwargs = {}
-    
+
     if has_image_grid_thw:
         # For Qwen-VL, image_grid_thw has shape (3,) for single image or (num_images, 3) for multiple
         # Stack them to create (total_images, 3) tensor
@@ -184,7 +184,9 @@ def prepare_micro_batch_packing(samples: list[BatchSample], max_seq_len: int, te
         for sample in samples:
             if "extra_model_kwargs" in sample and sample["extra_model_kwargs"]:
                 extra_kwargs.update(sample["extra_model_kwargs"])
-    
+
+    # Always attach extra_model_kwargs if we have any model kwargs (e.g., image_grid_thw),
+    # even if there were no per-sample extra_model_kwargs.
     if extra_kwargs:
         micro_batch["extra_model_kwargs"] = extra_kwargs
 
@@ -231,11 +233,10 @@ def prepare_batch(
         # Zero out multimodal fields in padding batch if present
         if "pixel_values" in padded_batch and padded_batch["pixel_values"] is not None:
             padded_batch["pixel_values"] = torch.zeros_like(padded_batch["pixel_values"])
-        if "extra_model_kwargs" in padded_batch and padded_batch["extra_model_kwargs"]:
-            if "image_grid_thw" in padded_batch["extra_model_kwargs"]:
-                padded_batch["extra_model_kwargs"]["image_grid_thw"] = torch.zeros_like(
-                    padded_batch["extra_model_kwargs"]["image_grid_thw"]
-                )
+        # IMPORTANT: do NOT overwrite `image_grid_thw` for multimodal padding batches.
+        # Qwen2.5-VL requires a consistent `pixel_values` <-> `image_grid_thw` pairing.
+        # We keep `image_grid_thw` as-is (copied from a real micro-batch) while zeroing
+        # `pixel_values` and `loss_mask` so the padding batch contributes no learning signal.
         
         micro_batches.extend([padded_batch for _ in range(num_padding_batch)])
 
